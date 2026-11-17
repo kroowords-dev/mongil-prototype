@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>몬길 교체 연출 프로토타입</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* Layout: 화면 전체가 테스트 장면, 오른쪽에 목표별로 묶은 조절 패널, 상단에 연출 구간 타임라인 */
+:root {
+  color-scheme: dark;
+  --scene: #1D222A;
+  --panel: #232831;
+  --panel-2: #2B313B;
+  --line: #3A414D;
+  --fg: #ECE9E2;
+  --muted: #9AA2AE;
+  --accent: #E3B84A;
+  --accent-ink: #1D222A;
+  --warrior: #D9822B;
+  --ranger: #3FA796;
+  --mage: #9C7BD8;
+  --danger: #E07A6A;
+  --font: 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+}
+html, body { height: 100%; }
+body { background: var(--scene); color: var(--fg); font-family: var(--font); overflow: hidden; }
+* { box-sizing: border-box; }
+button, input, select, textarea { font-family: inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+#stage { position: fixed; inset: 0; }
+#stage canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+#stage canvas.dragging { cursor: grabbing; }
+
+/* HUD */
+.hud { position: fixed; pointer-events: none; transition: opacity .12s ease; }
+body.ui-hidden .hide-on-tag { opacity: 0; }
+.boss-hud { top: calc(16px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); width: min(420px, 60vw); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+body.panel-open #stage { right: 380px; }
+body.panel-open .boss-hud, body.panel-open .status { left: calc((100vw - 380px) / 2); }
+.boss-name { font-size: 13px; font-weight: 700; letter-spacing: .02em; color: var(--fg); text-shadow: 0 1px 3px #000; }
+.bar { width: 100%; height: 10px; background: rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.25); border-radius: 2px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 100%; background: var(--danger); transition: width .15s; }
+
+
+.slots { left: calc(20px + env(safe-area-inset-left, 0px)); bottom: calc(20px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 12px; pointer-events: auto; }
+.slot { display: flex; flex-direction: column; align-items: center; gap: 5px; background: none; border: 0; padding: 0; cursor: pointer; color: var(--fg); }
+.slot-face { position: relative; width: 58px; height: 58px; border-radius: 50%; background: rgba(20,24,30,.85); border: 2px solid rgba(255,255,255,.28); display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; }
+.slot-face span { font-size: 12px; font-weight: 700; position: relative; z-index: 1; }
+.slot-face small { font-size: 10px; color: var(--muted); position: relative; z-index: 1; }
+.slot.active .slot-face { border-color: var(--accent); }
+.slot-cd { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; font-family: var(--mono); font-size: 14px; font-weight: 700; z-index: 2; }
+.slot-key { font-family: var(--mono); font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 5px; background: rgba(20,24,30,.8); }
+.slot.denied .slot-face { animation: shake .25s; }
+@keyframes shake { 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
+@media (prefers-reduced-motion: reduce) { .slot.denied .slot-face { animation: none; } }
+
+.status { left: 50%; transform: translateX(-50%); bottom: calc(52px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 6px; }
+.chip { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 3px; background: var(--accent); color: var(--accent-ink); }
+
+/* 패널 */
+#panel { position: fixed; top: 0; right: 0; bottom: 0; width: 380px; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; z-index: 5; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); padding-right: env(safe-area-inset-right, 0px); }
+#panel[hidden] { display: none !important; }
+.p-scroll { overflow-y: auto; padding: 18px 18px 24px; display: flex; flex-direction: column; gap: 18px; }
+.p-head { display: flex; flex-direction: column; gap: 6px; }
+.eyebrow { font-size: 11px; color: var(--muted); letter-spacing: .03em; }
+.p-head h1 { font-size: 20px; font-weight: 900; margin: 0; }
+
+.block { display: flex; flex-direction: column; gap: 10px; }
+.block-title { display: flex; align-items: baseline; gap: 8px; font-size: 14px; font-weight: 700; margin: 0; }
+.block-title .num { font-family: var(--mono); color: var(--accent); }
+.group { border-top: 1px solid var(--line); padding-top: 14px; }
+
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+.seg button { background: transparent; color: var(--muted); border: 0; border-right: 1px solid var(--line); padding: 6px 4px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.seg button:last-child { border-right: 0; }
+.seg button.on { background: var(--accent); color: var(--accent-ink); }
+.seg button:disabled { opacity: .4; cursor: default; }
+
+.btn { background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); border-radius: 3px; padding: 7px 10px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn:disabled { opacity: .4; cursor: default; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+
+.param { display: grid; grid-template-columns: 112px 1fr 58px; align-items: center; gap: 8px; }
+.param label { font-size: 12px; line-height: 1.3; }
+.param label em { display: block; font-style: normal; font-size: 10.5px; color: var(--muted); }
+.param input[type=range] { width: 100%; accent-color: var(--accent); }
+.param .val { font-family: var(--mono); font-size: 12px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.param select { grid-column: span 2; background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); border-radius: 3px; padding: 4px 6px; font-size: 12px; }
+.tag-char { font-size: 10px; font-weight: 700; padding: 0 4px; border-radius: 2px; margin-left: 4px; vertical-align: 1px; color: var(--accent-ink); }
+.check { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+.check input { accent-color: var(--accent); }
+
+
+
+@media (max-width: 760px) {
+  #panel { top: auto; left: 0; width: auto; max-height: 52vh; border-left: 0; border-top: 1px solid var(--line); padding-left: env(safe-area-inset-left, 0px); }
+  .p-scroll { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  body.panel-open #stage { right: 0; }
+  body.panel-open .boss-hud, body.panel-open .status { left: 50%; }
+  body.panel-open .slots { bottom: calc(52vh + 12px); }
+}
+</style>
+<style>body{margin:0} [hidden]{display:none!important}</style>
+</head>
+<body>
+
+<div id="stage" aria-label="캐릭터 교체 테스트 장면"></div>
+
+<div class="hud boss-hud">
+  <div class="boss-name">훈련용 골렘 (타겟)</div>
+  <div class="bar"><i id="boss-hp"></i></div>
+</div>
+
+<div class="hud slots hide-on-tag" id="slots"></div>
+<div class="hud status hide-on-tag" id="status"></div>
+
+<aside id="panel" aria-label="교체 연출 조절 패널">
+  <div class="p-scroll">
+    <div class="p-head">
+      <p class="eyebrow">몬길: STAR DIVE 캐릭터 교체 역기획 · 프로토타입</p>
+      <h1>교체 연출 확인 도구</h1>
+    </div>
+
+    <section class="block">
+      <h2 class="block-title">수치를 볼 캐릭터</h2>
+      <div class="seg" id="char-tabs" role="tablist" aria-label="수치를 볼 캐릭터"></div>
+    </section>
+
+    <section class="block group" id="g1">
+      <h2 class="block-title"><span class="num">①</span>교체했다는 것을 인지</h2>
+    </section>
+    <section class="block group" id="g2">
+      <h2 class="block-title"><span class="num">②</span>교체한 캐릭터의 활약</h2>
+    </section>
+
+  </div>
+</aside>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+'use strict';
+
+/* ---------- 수치 ---------- */
+const DEF = {
+  cam: { yaw: 10, dist: 4.8, height: 2.0, fov: 55, lag: 0.65, inTime: 0.1, outTime: 0.05, align: 'target', hideUI: true },
+  chars: [
+    { name: '전사',   type: 'Dash',     tagDist: 6.5, tagAngle: 35, actDist: 4.5, motion: 0.8, color: '#D9822B', weapon: 'sword' },
+    { name: '레인저', type: 'Backstep', tagDist: 3.5, tagAngle: 45, actDist: 4.5, motion: 0.8, color: '#3FA796', weapon: 'bow' },
+    { name: '마법사', type: 'Stay',     tagDist: 6.0, tagAngle: 65, actDist: 0.0, motion: 0.8, color: '#9C7BD8', weapon: 'staff' }
+  ],
+  sys: { tagCool: 15, sysCool: 0.5, invincible: 1.0, useCool: false, gizmo: false } // 고정값
+};
+const clone = (o) => JSON.parse(JSON.stringify(o));
+let P = clone(DEF);
+
+const TYPE_LABEL = { Dash: '돌진 (타겟 쪽으로)', Backstep: '후퇴 (타겟 반대쪽)', Stay: '제자리' };
+
+/* 조절 항목. scope: cam = 공통, char = 캐릭터별, sys = 테스트 설정 */
+const PARAMS = [
+  { g: 'g1', scope: 'char', key: 'tagAngle', label: '등장 각도', min: 0, max: 180, step: 5, unit: '°' },
+  { g: 'g1', scope: 'char', key: 'tagDist', label: '등장 거리', min: 1.5, max: 14, step: 0.5, unit: 'm' },
+  { g: 'g1', scope: 'cam', key: 'yaw', label: '카메라 수평 각도', min: -60, max: 60, step: 1, unit: '°', sign: true },
+  { g: 'g2', scope: 'char', key: 'type', label: '교체 스킬 타입', kind: 'select', options: ['Dash', 'Backstep', 'Stay'] },
+  { g: 'g2', scope: 'char', key: 'actDist', label: '행동 거리', min: 0, max: 10, step: 0.5, unit: 'm' },
+  { g: 'g2', scope: 'char', key: 'motion', label: '교체 스킬 시간', min: 0.3, max: 2, step: 0.05, unit: 's' },
+  { g: 'g2', scope: 'cam', key: 'dist', label: '카메라 거리', min: 2.5, max: 10, step: 0.1, unit: 'm' },
+  { g: 'g2', scope: 'cam', key: 'height', label: '카메라 높이', min: 0.6, max: 5.5, step: 0.1, unit: 'm' }
+];
+
+let selChar = 0;     // 패널에서 수치를 보고 있는 캐릭터
+
+/* ---------- 장면 ---------- */
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1D222A);
+scene.fog = new THREE.Fog(0x1D222A, 26, 70);
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
+
+scene.add(new THREE.HemisphereLight(0xE6E9EE, 0x15181D, 0.75));
+const sun = new THREE.DirectionalLight(0xFFF4E2, 0.85);
+sun.position.set(9, 16, 7);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -20, right: 20, top: 20, bottom: -20, near: 1, far: 50 });
+scene.add(sun);
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(140, 140), new THREE.MeshStandardMaterial({ color: 0x2A303A, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+const grid = new THREE.GridHelper(140, 70, 0x3A424F, 0x323843);
+grid.position.y = 0.01;
+scene.add(grid);
+const arena = new THREE.Mesh(new THREE.RingGeometry(15.8, 16, 96), new THREE.MeshBasicMaterial({ color: 0x4A5260, side: THREE.DoubleSide }));
+arena.rotation.x = -Math.PI / 2; arena.position.y = 0.02;
+scene.add(arena);
+
+const V = THREE.Vector3, UP = new V(0, 1, 0);
+const std = (c, o) => new THREE.MeshStandardMaterial(Object.assign({ color: c, roughness: 0.8, metalness: 0.05 }, o || {}));
+function box(w, h, d, m, x, y, z) { const me = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); me.position.set(x, y, z); me.castShadow = true; return me; }
+
+/* 보스 */
+const boss = new THREE.Group();
+const bossMat = std(0x77716A, { roughness: 0.95 });
+const bossDark = std(0x5E5953, { roughness: 0.95 });
+const eyeMat = new THREE.MeshStandardMaterial({ color: 0xE3B84A, emissive: 0xE3B84A, emissiveIntensity: 0.9 });
+boss.add(box(2.4, 2.6, 1.6, bossMat, 0, 2.5, 0));
+boss.add(box(1.2, 0.95, 1.05, bossMat, 0, 4.25, 0.05));
+boss.add(box(0.26, 0.12, 0.05, eyeMat, -0.28, 4.32, 0.6));
+boss.add(box(0.26, 0.12, 0.05, eyeMat, 0.28, 4.32, 0.6));
+boss.add(box(0.75, 2.3, 0.75, bossDark, -1.65, 2.3, 0.1));
+boss.add(box(0.75, 2.3, 0.75, bossDark, 1.65, 2.3, 0.1));
+boss.add(box(0.85, 1.25, 0.95, bossDark, -0.65, 0.62, 0));
+boss.add(box(0.85, 1.25, 0.95, bossDark, 0.65, 0.62, 0));
+boss.add(box(1.6, 0.5, 0.06, eyeMat, 0, 2.9, 0.82)); // 정면 표시
+scene.add(boss);
+let bossHp = 100, bossFlash = 0;
+
+/* 캐릭터 모델 */
+function makeChar(c, ghost) {
+  const g = new THREE.Group();
+  const extra = ghost ? { transparent: true, opacity: 0.45, depthWrite: false } : {};
+  const body = std(c.color, extra), skin = std(0xE7D7C2, extra), dark = std(0x2E333B, extra), wpn = std(0xC9CED6, Object.assign({ metalness: 0.4, roughness: 0.4 }, extra));
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.36, 0.95, 14), body); torso.position.y = 1.08; g.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.23, 16, 12), skin); head.position.y = 1.78; g.add(head);
+  const legL = box(0.17, 0.68, 0.19, dark, -0.13, 0.34, 0), legR = box(0.17, 0.68, 0.19, dark, 0.13, 0.34, 0);
+  const armL = new THREE.Group(), armR = new THREE.Group();
+  armL.position.set(-0.42, 1.48, 0); armR.position.set(0.42, 1.48, 0);
+  armL.add(box(0.13, 0.62, 0.13, body, 0, -0.3, 0)); armR.add(box(0.13, 0.62, 0.13, body, 0, -0.3, 0));
+  g.add(legL, legR, armL, armR);
+  if (c.weapon === 'sword') { const s = box(0.08, 1.25, 0.18, wpn, 0, -0.75, 0.25); s.rotation.x = 1.2; armR.add(s); }
+  if (c.weapon === 'bow') { const b = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.03, 6, 20, Math.PI), wpn); b.rotation.set(0, Math.PI / 2, Math.PI / 2); b.position.set(0, -0.62, 0.12); armL.add(b); }
+  if (c.weapon === 'staff') { const s = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 1.8, 8), wpn); s.position.set(0, -0.5, 0.15); armR.add(s); const o = new THREE.Mesh(new THREE.SphereGeometry(0.11, 12, 8), std(c.color, Object.assign({ emissive: new THREE.Color(c.color), emissiveIntensity: 0.6 }, extra))); o.position.set(0, 0.42, 0.15); armR.add(o); }
+  g.traverse((o) => { if (o.isMesh) o.castShadow = !ghost; });
+  g.userData = { legL, legR, armL, armR, phase: 0 };
+  return g;
+}
+const player = new THREE.Group();
+scene.add(player);
+const models = DEF.chars.map((c) => { const m = makeChar(c, false); player.add(m); return m; });
+const ghosts = DEF.chars.map((c) => { const m = makeChar(c, true); m.visible = false; scene.add(m); return m; });
+const shield = new THREE.Mesh(new THREE.SphereGeometry(1.05, 20, 14), new THREE.MeshBasicMaterial({ color: 0xE3B84A, wireframe: true, transparent: true, opacity: 0 }));
+shield.position.y = 1.0; player.add(shield);
+let active = 0;
+function showModel(i) { models.forEach((m, k) => { m.visible = k === i; }); }
+
+function animModel(m, dt, state) {
+  const u = m.userData; u.phase += dt * (state === 'walk' ? 10 : 2);
+  if (state === 'walk') {
+    const s = Math.sin(u.phase) * 0.6;
+    u.legL.rotation.x = s; u.legR.rotation.x = -s; u.armL.rotation.x = -s * 0.7; u.armR.rotation.x = s * 0.7;
+  } else if (state === 'skill') {
+    u.legL.rotation.x = 0.35; u.legR.rotation.x = -0.25; u.armL.rotation.x = -1.2; u.armR.rotation.x = -1.45;
+  } else {
+    const s = Math.sin(u.phase) * 0.05;
+    u.legL.rotation.x = 0; u.legR.rotation.x = 0; u.armL.rotation.x = s; u.armR.rotation.x = -s;
+  }
+}
+
+/* 바닥 표시 */
+const gizmo = new THREE.Group(); scene.add(gizmo);
+let gizmoLife = 0;
+function lineMat(c, o) { return new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: o == null ? 1 : o }); }
+function flatRing(r1, r2, c, o) { const m = new THREE.Mesh(new THREE.RingGeometry(r1, r2, 40), new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: o == null ? 1 : o, side: THREE.DoubleSide, depthWrite: false })); m.rotation.x = -Math.PI / 2; return m; }
+function drawGizmo(T) {
+  while (gizmo.children.length) gizmo.remove(gizmo.children[0]);
+  if (!P.sys.gizmo) return;
+  const b = boss.position, y = 0.04;
+  gizmo.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new V(b.x, y, b.z), new V(b.x + T.fwd.x * T.c.tagDist, y, b.z + T.fwd.z * T.c.tagDist)]), lineMat(0x9AA2AE, 0.8)));
+  const pts = [], n = Math.max(6, Math.round(T.c.tagAngle / 4));
+  for (let i = 0; i <= n; i++) { const d = T.fwd.clone().applyAxisAngle(UP, -THREE.MathUtils.degToRad(T.c.tagAngle * i / n)); pts.push(new V(b.x + d.x * T.c.tagDist, y, b.z + d.z * T.c.tagDist)); }
+  gizmo.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat(0xE3B84A)));
+  gizmo.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new V(b.x, y, b.z), new V(T.spawn.x, y, T.spawn.z)]), lineMat(0xE3B84A, 0.6)));
+  const r = flatRing(0.5, 0.7, 0xE3B84A); r.position.set(T.spawn.x, 0.05, T.spawn.z); gizmo.add(r);
+  if (T.final.distanceTo(T.spawn) > 0.1) {
+    const col = new THREE.Color(T.c.color);
+    gizmo.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new V(T.spawn.x, 0.06, T.spawn.z), new V(T.final.x, 0.06, T.final.z)]), lineMat(col)));
+    const e = flatRing(0.35, 0.5, col); e.position.set(T.final.x, 0.06, T.final.z); gizmo.add(e);
+  }
+  gizmoLife = 3.5;
+}
+
+/* 스킬 효과 */
+const fx = [];
+function addFx(obj, life, update, delay) { obj.visible = !delay; scene.add(obj); fx.push({ obj, life, max: life, update, delay: delay || 0 }); }
+function hitBoss() { bossFlash = 0.18; bossHp -= 4; if (bossHp < 10) bossHp = 100; document.getElementById('boss-hp').style.width = bossHp + '%'; }
+function skillFx(T) {
+  const col = new THREE.Color(T.c.color), dur = T.c.motion;
+  if (T.c.type === 'Dash') {
+    const trail = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.02, 1), new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.7, depthWrite: false }));
+    addFx(trail, dur + 0.45, (o, k, t) => {
+      const a = T.spawn, bpos = player.position, len = Math.max(0.01, a.distanceTo(bpos));
+      if (t < dur) { o.position.set((a.x + bpos.x) / 2, 0.05, (a.z + bpos.z) / 2); o.scale.z = len; o.rotation.y = Math.atan2(bpos.x - a.x, bpos.z - a.z); }
+      o.material.opacity = t < dur ? 0.7 : 0.7 * (1 - (t - dur) / 0.45);
+    });
+    setSim(dur * 0.75, hitBoss);
+  } else if (T.c.type === 'Backstep') {
+    for (let i = 0; i < 3; i++) {
+      const ar = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.9, 6), new THREE.MeshBasicMaterial({ color: col }));
+      let from = null;
+      addFx(ar, 0.28, (o, k) => {
+        if (!from) from = player.position.clone().add(new V(0, 1.3, 0));
+        const to = boss.position.clone().add(new V(0, 2.6, 0));
+        o.position.lerpVectors(from, to, k);
+        o.lookAt(to); o.rotateX(Math.PI / 2);
+        if (k >= 1) hitBoss();
+      }, 0.15 + i * 0.14);
+    }
+  } else {
+    const ring = flatRing(0.85, 1.0, col, 0.9);
+    ring.position.set(boss.position.x, 0.07, boss.position.z);
+    addFx(ring, 0.6, (o, k) => { o.scale.setScalar(1 + k * 3); o.material.opacity = 0.9 * (1 - k); if (k > 0 && !o.userData.hit) { o.userData.hit = true; hitBoss(); } }, 0.2);
+    const base = flatRing(0.6, 0.9, col, 0.8);
+    base.position.set(T.spawn.x, 0.06, T.spawn.z);
+    addFx(base, dur, (o, k) => { o.material.opacity = 0.8 * (1 - k); o.rotation.z += 0.05; });
+  }
+}
+function updateFx(dt) {
+  for (let i = fx.length - 1; i >= 0; i--) {
+    const f = fx[i];
+    if (f.delay > 0) { f.delay -= dt; if (f.delay > 0) continue; f.obj.visible = true; }
+    f.life -= dt;
+    const t = f.max - Math.max(0, f.life), k = Math.min(1, t / f.max);
+    f.update(f.obj, k, t);
+    if (f.life <= 0) { scene.remove(f.obj); fx.splice(i, 1); }
+  }
+}
+const sims = [];
+function setSim(t, fn) { sims.push({ t, fn }); }
+
+/* ---------- 카메라 ---------- */
+const orbit = { yaw: Math.PI, pitch: 0.32, dist: 7.5 };
+const camPose = { pos: new V(), look: new V(), fov: 55 };
+function yawToBoss(from) { return Math.atan2(boss.position.x - from.x, boss.position.z - from.z); }
+function normalPose(out) {
+  const p = player.position, d = new V(Math.sin(orbit.yaw), 0, Math.cos(orbit.yaw));
+  const h = orbit.dist * Math.cos(orbit.pitch), v = orbit.dist * Math.sin(orbit.pitch) + 1.2;
+  out.pos.copy(p).addScaledVector(d, -h).add(new V(0, v, 0));
+  out.look.copy(p).addScaledVector(d, 4).add(new V(0, 1.3, 0));
+  out.fov = 55;
+  return out;
+}
+function tagPose(T, out) {
+  const cp = player.position;
+  const anchor = T.c.type === 'Backstep' ? T.final : T.spawn;
+  const ref = cp.clone().lerp(anchor, T.cam.lag);
+  const behind = T.toTarget.clone().negate().applyAxisAngle(UP, THREE.MathUtils.degToRad(T.cam.yaw));
+  out.pos.copy(ref).addScaledVector(behind, T.cam.dist).add(new V(0, T.cam.height, 0));
+  out.look.copy(cp).lerp(boss.position, 0.42).add(new V(0, 1.2, 0));
+  out.fov = T.cam.fov;
+  return out;
+}
+function newPose() { return { pos: new V(), look: new V(), fov: 55 }; }
+function copyPose(a, b) { a.pos.copy(b.pos); a.look.copy(b.look); a.fov = b.fov; return a; }
+function lerpPose(out, a, b, k) { out.pos.lerpVectors(a.pos, b.pos, k); out.look.lerpVectors(a.look, b.look, k); out.fov = a.fov + (b.fov - a.fov) * k; return out; }
+const ease = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const easeOut = (x) => 1 - Math.pow(1 - x, 3);
+
+/* ---------- 교체 ---------- */
+let T = null;            // 진행 중인 교체
+let sysCd = 0, invT = 0;
+const cds = [0, 0, 0];
+let lastFrom = 0;
+const tmpA = newPose(), tmpB = newPose();
+
+function tag(to) {
+  if (to === active || T) return false;
+  if (sysCd > 0 || (P.sys.useCool && cds[to] > 0)) { deny(to); return false; }
+  const from = active, c = clone(P.chars[to]), cam = clone(P.cam);
+  ghosts[from].position.copy(player.position); ghosts[from].rotation.copy(player.rotation); ghosts[from].visible = true;
+  ghosts[from].userData.fade = 0.35;
+  const fwd = new V(Math.sin(boss.rotation.y), 0, Math.cos(boss.rotation.y));
+  const spawnDir = fwd.clone().applyAxisAngle(UP, -THREE.MathUtils.degToRad(c.tagAngle));
+  const spawn = boss.position.clone().addScaledVector(spawnDir, c.tagDist); spawn.y = 0;
+  const toTarget = boss.position.clone().sub(spawn).setY(0).normalize();
+  const final = spawn.clone();
+  if (c.type === 'Dash') final.addScaledVector(toTarget, Math.min(c.actDist, Math.max(0, spawn.distanceTo(boss.position) - 1.9)));
+  if (c.type === 'Backstep') final.addScaledVector(toTarget, -c.actDist);
+  T = { t: 0, from, to, c, cam, fwd, spawn, final, toTarget, start: copyPose(newPose(), camPose), saved: { yaw: orbit.yaw, pitch: orbit.pitch, dist: orbit.dist }, inT: Math.min(cam.inTime, c.motion), restoreFrom: null };
+  active = to; lastFrom = from; showModel(to);
+  player.position.copy(spawn); player.lookAt(boss.position.x, 0, boss.position.z);
+  sysCd = P.sys.sysCool; invT = P.sys.invincible;
+  if (P.sys.useCool) cds[to] = P.sys.tagCool;
+  if (cam.hideUI) document.body.classList.add('ui-hidden');
+  drawGizmo(T); skillFx(T);
+  renderSlots();
+  return true;
+}
+function deny(i) { const el = document.querySelector('.slot[data-i="' + i + '"]'); if (!el) return; el.classList.remove('denied'); void el.offsetWidth; el.classList.add('denied'); }
+
+function updateTag(dt) {
+  T.t += dt;
+  const c = T.c;
+  if (T.t < c.motion) {
+    const k = T.t / c.motion;
+    player.position.lerpVectors(T.spawn, T.final, easeOut(k));
+    player.lookAt(boss.position.x, 0, boss.position.z);
+    tagPose(T, tmpB);
+    if (T.inT > 0 && T.t < T.inT) lerpPose(camPose, T.start, tmpB, ease(T.t / T.inT)); else copyPose(camPose, tmpB);
+    T.phase = T.t < T.inT ? 1 : 2;
+    return 'skill';
+  }
+  if (!T.restoreFrom) {
+    T.restoreFrom = copyPose(newPose(), camPose);
+    player.position.copy(T.final);
+    orbit.pitch = T.saved.pitch; orbit.dist = T.saved.dist;
+    orbit.yaw = T.cam.align === 'target' ? yawToBoss(player.position) : T.saved.yaw;
+    document.body.classList.remove('ui-hidden');
+  }
+  const r = T.t - c.motion;
+  if (T.cam.outTime > 0 && r < T.cam.outTime) {
+    normalPose(tmpB);
+    lerpPose(camPose, T.restoreFrom, tmpB, ease(r / T.cam.outTime));
+    T.phase = 3;
+    return 'idle';
+  }
+  normalPose(camPose);
+  T = null;
+  return 'idle';
+}
+
+
+/* ---------- 다시 보기 ---------- */
+function resetScene(fromIdx) {
+  T = null; fx.splice(0).forEach((f) => scene.remove(f.obj)); sims.length = 0;
+  while (gizmo.children.length) gizmo.remove(gizmo.children[0]);
+  ghosts.forEach((g) => { g.visible = false; });
+  document.body.classList.remove('ui-hidden');
+  active = fromIdx; showModel(fromIdx);
+  player.position.set(0, 0, 9); player.lookAt(0, 0, 0);
+  boss.rotation.set(0, 0, 0);
+  orbit.yaw = yawToBoss(player.position); orbit.pitch = 0.32; orbit.dist = 7.5;
+  normalPose(camPose);
+  sysCd = 0; invT = 0; cds.fill(0);
+  renderSlots();
+}
+
+/* ---------- 입력 ---------- */
+const keys = {};
+function typing(e) { const t = e.target; if (!t) return false; if (t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return true; return t.tagName === 'INPUT' && t.type !== 'range' && t.type !== 'checkbox'; }
+window.addEventListener('keydown', (e) => {
+  if (typing(e)) return;
+  keys[e.code] = true;
+  if (e.code === 'Digit1' || e.code === 'Digit2' || e.code === 'Digit3') tag(Number(e.code.slice(-1)) - 1);
+  else if (e.code === 'Space') { e.preventDefault(); tag((active + 1) % 3); }
+});
+window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+let drag = null;
+const cv = renderer.domElement;
+cv.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; cv.classList.add('dragging'); try { cv.setPointerCapture(e.pointerId); } catch (_) {} });
+cv.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag = { x: e.clientX, y: e.clientY };
+  if (T) return;
+  orbit.yaw -= dx * 0.005;
+  orbit.pitch = THREE.MathUtils.clamp(orbit.pitch + dy * 0.004, 0.06, 1.1);
+});
+function endDrag() { drag = null; cv.classList.remove('dragging'); }
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+
+/* ---------- HUD ---------- */
+const slotsEl = document.getElementById('slots');
+function renderSlots() {
+  slotsEl.innerHTML = '';
+  P.chars.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = 'slot' + (i === active ? ' active' : ''); b.dataset.i = i; b.type = 'button';
+    b.setAttribute('aria-label', c.name + '로 교체 (' + (i + 1) + '번 키)');
+    b.innerHTML = '<div class="slot-face" style="background:' + hexA(c.color, 0.28) + '"><span>' + c.name + '</span><small>' + ({ Dash: '돌진', Backstep: '후퇴', Stay: '제자리' })[c.type] + '</small><div class="slot-cd"></div></div><span class="slot-key">' + (i + 1) + '</span>';
+    b.addEventListener('click', () => tag(i));
+    slotsEl.appendChild(b);
+  });
+}
+function hexA(h, a) { const n = parseInt(h.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; }
+function updateSlotCd() {
+  document.querySelectorAll('.slot').forEach((el) => {
+    const i = Number(el.dataset.i), cd = el.querySelector('.slot-cd');
+    const v = Math.max(P.sys.useCool ? cds[i] : 0, i !== active ? sysCd : 0);
+    if (v > 0) { cd.style.display = 'flex'; cd.style.background = 'rgba(10,12,16,.72)'; cd.textContent = v.toFixed(1); } else cd.style.display = 'none';
+  });
+  const st = document.getElementById('status');
+  st.innerHTML = invT > 0 ? '<span class="chip">교체 무적 ' + invT.toFixed(1) + 's</span>' : '';
+}
+
+/* ---------- 패널 ---------- */
+function getVal(p) { return p.scope === 'char' ? P.chars[selChar][p.key] : P[p.scope][p.key]; }
+function getDef(p) { return p.scope === 'char' ? DEF.chars[selChar][p.key] : DEF[p.scope][p.key]; }
+function setVal(p, v) { if (p.scope === 'char') P.chars[selChar][p.key] = v; else P[p.scope][p.key] = v; }
+function fmt(p, v) {
+  if (p.kind === 'select') return TYPE_LABEL[v];
+  if (p.kind === 'check') return v ? '켬' : '끔';
+  if (p.pct) return Math.round(v * 100) + '%';
+  const dec = p.step < 0.1 ? 2 : p.step < 1 ? 1 : 0;
+  return (p.sign && v > 0 ? '+' : '') + Number(v).toFixed(dec) + p.unit;
+}
+const rows = [];
+function buildPanel() {
+  const tabs = document.getElementById('char-tabs');
+  P.chars.forEach((c, i) => {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = c.name; b.setAttribute('role', 'tab');
+    b.addEventListener('click', () => { selChar = i; syncPanel(); });
+    tabs.appendChild(b);
+  });
+  PARAMS.forEach((p, idx) => {
+    const g = document.getElementById(p.g), id = 'p-' + idx;
+    let el;
+    if (p.kind === 'check') {
+      el = document.createElement('label'); el.className = 'check';
+      el.innerHTML = '<input type="checkbox" id="' + id + '"> <span>' + p.label + '</span>';
+      el.querySelector('input').addEventListener('change', (e) => { setVal(p, e.target.checked); syncPanel(); });
+    } else if (p.kind === 'select') {
+      el = document.createElement('div'); el.className = 'param';
+      el.innerHTML = '<label for="' + id + '">' + p.label + charChip() + '</label><select id="' + id + '">' + p.options.map((o) => '<option value="' + o + '">' + TYPE_LABEL[o] + '</option>').join('') + '</select>';
+      el.querySelector('select').addEventListener('change', (e) => { setVal(p, e.target.value); syncPanel(); renderSlots(); });
+    } else {
+      el = document.createElement('div'); el.className = 'param';
+      el.innerHTML = '<label for="' + id + '">' + p.label + (p.scope === 'char' ? charChip() : '') + '</label><input type="range" id="' + id + '" min="' + p.min + '" max="' + p.max + '" step="' + p.step + '"><span class="val"></span>';
+      el.querySelector('input').addEventListener('input', (e) => { setVal(p, Number(e.target.value)); syncRow(rows[idx]); });
+    }
+    g.appendChild(el);
+    rows[idx] = { p, el };
+  });
+}
+function charChip() { return '<span class="tag-char char-chip"></span>'; }
+function syncRow(r) {
+  const p = r.p, v = getVal(p), el = r.el;
+  if (p.kind === 'check') { el.querySelector('input').checked = !!v; return; }
+  if (p.kind === 'select') el.querySelector('select').value = v;
+  if (!p.kind) { el.querySelector('input').value = v; el.querySelector('.val').textContent = fmt(p, v); }
+  el.querySelectorAll('.char-chip').forEach((c) => { c.textContent = P.chars[selChar].name; c.style.background = P.chars[selChar].color; });
+}
+function syncPanel() {
+  document.querySelectorAll('#char-tabs button').forEach((b, i) => { b.classList.toggle('on', i === selChar); b.setAttribute('aria-selected', i === selChar); });
+  rows.forEach(syncRow);
+}
+
+
+
+
+/* ---------- 루프 ---------- */
+function resize() {
+  const w = Math.max(1, stage.clientWidth), h = Math.max(1, stage.clientHeight);
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+
+const clock = new THREE.Clock();
+function frame() {
+  requestAnimationFrame(frame);
+  const real = Math.min(clock.getDelta(), 0.1), dt = real;
+
+  for (let i = sims.length - 1; i >= 0; i--) { sims[i].t -= dt; if (sims[i].t <= 0) { const f = sims[i].fn; sims.splice(i, 1); f(); } }
+
+  let state = 'idle';
+  if (T) state = updateTag(dt);
+  else {
+    const f = new V(Math.sin(orbit.yaw), 0, Math.cos(orbit.yaw)), r = new V().crossVectors(f, UP);
+    const mv = new V();
+    if (keys.KeyW || keys.ArrowUp) mv.add(f);
+    if (keys.KeyS || keys.ArrowDown) mv.sub(f);
+    if (keys.KeyD || keys.ArrowRight) mv.add(r);
+    if (keys.KeyA || keys.ArrowLeft) mv.sub(r);
+    if (mv.lengthSq() > 0) { mv.normalize(); player.position.addScaledVector(mv, 6.5 * dt); player.rotation.y = Math.atan2(mv.x, mv.z); state = 'walk'; }
+    const bp = player.position.clone().setY(0);
+    if (bp.length() > 15.2) { bp.setLength(15.2); player.position.x = bp.x; player.position.z = bp.z; }
+    normalPose(tmpA);
+    const k = 1 - Math.exp(-14 * dt);
+    lerpPose(camPose, camPose, tmpA, k);
+  }
+  if (!T) {
+    const target = Math.atan2(player.position.x - boss.position.x, player.position.z - boss.position.z);
+    let d = target - boss.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d));
+    boss.rotation.y += d * Math.min(1, 6 * dt);
+  }
+  animModel(models[active], dt, state);
+
+  ghosts.forEach((g) => { if (g.visible) { g.userData.fade -= dt; const o = Math.max(0, g.userData.fade / 0.35) * 0.45; g.traverse((m) => { if (m.isMesh) m.material.opacity = o; }); if (g.userData.fade <= 0) g.visible = false; } });
+  updateFx(dt);
+  if (gizmoLife > 0) { gizmoLife -= dt; if (gizmoLife <= 0) while (gizmo.children.length) gizmo.remove(gizmo.children[0]); }
+  if (bossFlash > 0) { bossFlash -= dt; bossMat.emissive.setRGB(bossFlash * 3, bossFlash * 2.4, bossFlash * 1.6); } else bossMat.emissive.setRGB(0, 0, 0);
+
+  if (sysCd > 0) sysCd = Math.max(0, sysCd - dt);
+  for (let i = 0; i < 3; i++) if (cds[i] > 0) cds[i] = Math.max(0, cds[i] - dt);
+  if (invT > 0) invT = Math.max(0, invT - dt);
+  shield.material.opacity = invT > 0 ? 0.35 : 0;
+
+  camera.position.copy(camPose.pos); camera.lookAt(camPose.look);
+  if (Math.abs(camera.fov - camPose.fov) > 0.01) { camera.fov = camPose.fov; camera.updateProjectionMatrix(); }
+  updateSlotCd();
+  renderer.render(scene, camera);
+}
+
+/* ---------- 시작 ---------- */
+buildPanel();
+document.body.classList.add('panel-open');
+resetScene(0);
+syncPanel();
+resize();
+frame();
+})();
+</script>
+
+</body>
+</html>
